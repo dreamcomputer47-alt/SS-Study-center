@@ -105,13 +105,18 @@ app.get('/api/public', (req,res)=>{
     push: {enabled: !!webpush && !!vapidKeys, publicKey: vapidKeys?.publicKey || '', subscribers: db.pushSubscriptions.length}
   });
 });
-app.get('/api/student/course/:courseId',studentAuth,(req,res)=>{
+app.get('/api/student/course/:courseId',(req,res)=>{
   const courseId=String(req.params.courseId||'');
   const course=courseCatalog().find(x=>x.id===courseId);
   if(!course) return res.status(404).json({error:'Course not found'});
   const price=Number(db.settings?.coursePricing?.[courseId])||0;
   const paid=price>0;
-  const purchased=Array.isArray(req.student.purchases)&&req.student.purchases.includes(courseId);
+  const student=currentStudent(req);
+  if(paid){
+    if(!student) return res.status(401).json({error:'login required'});
+    if(student.blocked) return res.status(403).json({error:'Student blocked'});
+  }
+  const purchased=!!student && Array.isArray(student.purchases)&&student.purchases.includes(courseId);
   if(paid&&!purchased) return res.status(403).json({error:'Course purchase/approval required',courseId,price,paid:true});
   const videos=(db.videos||[]).map(v=>({...v,course:courseForVideo(v),subject:subjectForVideo(v)})).filter(v=>v.course===courseId);
   res.json({course:{...course,price,paid,purchased},videos});
@@ -176,11 +181,10 @@ app.post('/api/push/subscribe',(req,res)=>{
 app.delete('/api/push/subscribe',(req,res)=>{ const endpoint=String(req.body?.endpoint||''); if(endpoint){ db.pushSubscriptions=(db.pushSubscriptions||[]).filter(x=>x.endpoint!==endpoint); saveData(); } res.json({ok:true}); });
 app.get('/api/live', (req,res)=>res.json(db.settings?.live || defaultData.settings.live));
 app.get('/api/comments', (req,res)=>res.json(db.comments.slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,100)));
-app.post('/api/comments',(req,res)=>{
-  const name=String(req.body.name||'Student').trim().slice(0,60);
+app.post('/api/comments',studentAuth,(req,res)=>{
   const message=String(req.body.message||'').trim().slice(0,500);
   if(!message) return res.status(400).json({error:'Comment লিখুন'});
-  const item={id:id(),name:name||'Student',message,createdAt:new Date().toISOString()};
+  const item={id:id(),studentId:req.student.id,name:req.student.name,message,createdAt:new Date().toISOString()};
   db.comments.push(item); saveData(); res.json(item);
 });
 app.get('/api/admin/content',auth,(req,res)=>{
@@ -251,19 +255,21 @@ app.post('/api/admin/settings',auth,(req,res)=>{
   }
   saveData(); res.json(db.settings);
 });
-app.post('/api/admin/branding',auth,upload.fields([{name:'logo',maxCount:1},{name:'banner',maxCount:1},{name:'customImage',maxCount:1}]),(req,res)=>{
-  const f=req.files||{}; const logo=f.logo?.[0], banner=f.banner?.[0], custom=f.customImage?.[0];
+app.post('/api/admin/branding',auth,upload.fields([{name:'logo',maxCount:1},{name:'banner',maxCount:1},{name:'paymentQR',maxCount:1},{name:'customImage',maxCount:1}]),(req,res)=>{
+  const f=req.files||{}; const logo=f.logo?.[0], banner=f.banner?.[0], paymentQR=f.paymentQR?.[0], custom=f.customImage?.[0];
   if(logo && !logo.mimetype.startsWith('image/')) return res.status(400).json({error:'Logo must be an image'});
   if(banner && !banner.mimetype.startsWith('image/')) return res.status(400).json({error:'Banner must be an image'});
+  if(paymentQR && !paymentQR.mimetype.startsWith('image/')) return res.status(400).json({error:'Payment QR must be an image'});
   if(custom && !custom.mimetype.startsWith('image/')) return res.status(400).json({error:'Custom image must be an image'});
   db.settings={...defaultData.settings,...db.settings};
   if(logo){ removeFile(db.settings.logo); db.settings.logo='/uploads/'+logo.filename; }
   if(banner){ removeFile(db.settings.banner); db.settings.banner='/uploads/'+banner.filename; }
+  if(paymentQR){ removeFile(db.settings.paymentQR); db.settings.paymentQR='/uploads/'+paymentQR.filename; }
   if(custom){ db.assets=db.assets||[]; db.assets.push({id:id(),type:'image',title:String(req.body.customTitle||custom.originalname),url:'/uploads/'+custom.filename,size:custom.size,mime:custom.mimetype,createdAt:new Date().toISOString()}); }
   saveData(); res.json(db.settings);
 });
 app.post('/api/admin/branding/remove',auth,(req,res)=>{
-  const key=req.body?.key; if(key!=='logo' && key!=='banner') return res.status(400).json({error:'Invalid branding key'});
+  const key=req.body?.key; if(!['logo','banner','paymentQR'].includes(key)) return res.status(400).json({error:'Invalid branding key'});
   db.settings={...defaultData.settings,...db.settings}; removeFile(db.settings[key]); db.settings[key]=''; saveData(); res.json(db.settings);
 });
 app.post('/api/admin/notification',auth,(req,res)=>{
@@ -281,6 +287,23 @@ app.post('/api/admin/achiever',auth,upload.single('image'),(req,res)=>{
 app.delete('/api/admin/achievers/:id',auth,(req,res)=>{const i=db.achievers.findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [a]=db.achievers.splice(i,1);removeFile(a.url);saveData();res.json({ok:true});});
 app.delete('/api/admin/comments/:id',auth,(req,res)=>{const i=db.comments.findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);db.comments.splice(i,1);saveData();res.json({ok:true});});
 
+app.post('/api/admin/railway-notification',auth,upload.single('file'),(req,res)=>{
+  const file=req.file;
+  if(file && !/^(application\/pdf|image\/)/.test(file.mimetype)){try{fs.unlinkSync(file.path)}catch{};return res.status(400).json({error:'File must be PDF or image'});}
+  const item={id:id(),topic:String(req.body.topic||'Notice'),date:String(req.body.date||new Date().toISOString().slice(0,10)),title:String(req.body.title||'Railway Alert'),message:String(req.body.message||''),url:String(req.body.url||''),file:file?'/uploads/'+file.filename:null,createdAt:new Date().toISOString()};
+  if(!item.title||!item.message)return res.status(400).json({error:'Title and details required'});
+  db.railwayNotifications=db.railwayNotifications||[];db.railwayNotifications.push(item);saveData();addNotification({type:'railway',title:'🚆 '+item.title,message:item.message,url:'#railway-notifications'});res.json(item);
+});
+app.post('/api/admin/mock-test',auth,upload.any(),(req,res)=>{
+  let questions=[];try{questions=JSON.parse(String(req.body.questions||'[]'));}catch{return res.status(400).json({error:'Invalid questions data'});}
+  if(!String(req.body.title||'').trim()||!questions.length)return res.status(400).json({error:'Title and at least one question required'});
+  const files=req.files||[];
+  files.forEach(f=>{if(!f.mimetype.startsWith('image/')){try{fs.unlinkSync(f.path)}catch{}}});
+  const clean=questions.map((q,i)=>({q:String(q.q||'').slice(0,500),options:Array.isArray(q.options)?q.options.map(x=>String(x).slice(0,250)).filter(Boolean).slice(0,4):[],answer:Math.max(0,Number(q.answer)||0),solutionImage:(files.find(f=>f.fieldname==='solution_'+i)?.mimetype||'').startsWith('image/')?'/uploads/'+files.find(f=>f.fieldname==='solution_'+i).filename:null})).filter(q=>q.q&&q.options.length>=2);
+  if(!clean.length)return res.status(400).json({error:'At least one valid question required'});
+  const item={id:id(),title:String(req.body.title).slice(0,150),category:String(req.body.category||'General').slice(0,80),duration:Math.max(1,Number(req.body.duration)||30),questions:clean,createdAt:new Date().toISOString()};
+  db.mockTests=db.mockTests||[];db.mockTests.push(item);saveData();addNotification({title:'📝 নতুন Mock Test',message:item.title,url:'#mock-tests'});res.json(item);
+});
 app.post('/api/admin/youtube',auth,upload.single('pdf'),(req,res)=>{
   const {title,desc,url,id:videoId}=req.body; const vid=videoId||extractYoutubeId(url||'');
   if(!title||!vid){if(req.file)try{fs.unlinkSync(req.file.path)}catch{};return res.status(400).json({error:'Title and valid YouTube URL/ID required'});}
