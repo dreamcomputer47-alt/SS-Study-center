@@ -75,7 +75,7 @@ function hashPassword(p){ return crypto.createHash('sha256').update(String(p||''
 function rememberToken(req){ const h=req.headers.cookie||''; const m=h.match(/ss_student_remember=([^;]+)/); return m ? m[1] : ''; }
 function currentStudent(req){ const sid=studentSessions.get(studentToken(req)); if(sid) return (db.students||[]).find(s=>s.id===sid) || null; const rt=rememberToken(req); if(!rt) return null; const rh=hashPassword(rt); return (db.students||[]).find(s=>s.rememberTokenHash===rh) || null; }
 function setStudentCookies(res,s){ const session=crypto.randomBytes(32).toString('hex'); const remember=crypto.randomBytes(48).toString('hex'); s.rememberTokenHash=hashPassword(remember); studentSessions.set(session,s.id); const secure=process.env.NODE_ENV==='production'?'; Secure':''; res.setHeader('Set-Cookie',[`ss_student=${session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${secure}`,`ss_student_remember=${remember}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000${secure}`]); }
-function studentView(s){ if(!s) return null; const {passwordHash,securityAnswerHash,...safe}=s; return safe; }
+function studentView(s){ if(!s) return null; const {passwordHash,securityAnswerHash,rememberTokenHash,...safe}=s; return safe; }
 function studentAuth(req,res,next){ const s=currentStudent(req); if(!s) return res.status(401).json({error:'login required'}); if(s.blocked) return res.status(403).json({error:'Student blocked'}); req.student=s; next(); }
 
 function cookieToken(req){ const h=req.headers.cookie||''; const m=h.match(/ss_admin=([^;]+)/); return m ? m[1] : ''; }
