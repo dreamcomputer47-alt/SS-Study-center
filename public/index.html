@@ -189,8 +189,9 @@ async function setupBrowserNotifications(){if(!me){openAuth('login');return}if(!
 function urlBase64ToUint8Array(base64){const padding='='.repeat((4-base64.length%4)%4);const raw=atob((base64+padding).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)))}
 function updateNotifyButton(){const b=$('#heroNotify');if(!b)return;if('Notification' in window&&Notification.permission==='granted'){b.textContent='🔔 Get Notified';b.classList.add('primary');b.classList.remove('ghost')}else{b.textContent='🔔 Get Notifications';b.classList.remove('primary');b.classList.add('ghost')}}
 $('#heroNotify').onclick=setupBrowserNotifications;
-async function load(){try{data=await api('/api/public');setCourses(data.courses||[]);me=data.currentStudent||await api('/api/student/me');}catch{try{data=await api('/api/public');me=data.currentStudent||null}catch{}}applySettings();applyCoursePricing();updateAuth();updateNotifyButton();renderNotifications();renderComments();renderHomeFaculty();renderCourses();renderAffairs();renderRailway();renderMock();renderFaculty();renderSuccess();renderLive();show(route(),true)}
-load();let lastLiveState='';
+async function load(){try{data=await api('/api/public');setCourses(data.courses||[]);me=data.currentStudent||await api('/api/student/me');}catch{try{data=await api('/api/public');me=data.currentStudent||null}catch{}}applySettings();applyCoursePricing();updateAuth();updateNotifyButton();renderNotifications();renderComments();renderHomeFaculty();renderCourses();renderAffairs();renderRailway();renderMock();renderFaculty();renderSuccess();lastLiveState=JSON.stringify(data.settings?.live||{});renderLive();show(route(),true)}
+let lastLiveState=null;
+load();
 setInterval(async()=>{
   try{
     const fresh=await api('/api/public');
