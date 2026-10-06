@@ -93,7 +93,31 @@ $('#forgotForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/stude
 
 startStudentRefresh(); window.addEventListener('focus',refreshStudentState);
 $('#registerForm').onsubmit=async e=>{e.preventDefault();try{me=await api('/api/student/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});data=await api('/api/public');applySettings();applyCoursePricing();$('#authModal').classList.remove('open');updateAuth();show('home',false)}catch(x){$('#registerMsg').textContent=x.message}};
-function updateAuth(){if(me){$('#loginBtn').classList.add('hidden');$('#profileWrap').classList.remove('hidden');$('#profileName').textContent=me.name||'Student';$('#profilePhone').textContent=me.phone||'';$('#avatarBtn').innerHTML=me.photo?`<img src="${esc(me.photo)}?v=${Date.now()}" alt="Profile" style="width:38px;height:38px;border-radius:50%;object-fit:cover">`:(me.name||'S').trim().charAt(0).toUpperCase();$('#drawerLogin').textContent='Logout';$('#drawerLogin').onclick=logout}else{$('#loginBtn').classList.remove('hidden');$('#profileWrap').classList.add('hidden');$('#drawerLogin').textContent='Login';$('#drawerLogin').onclick=()=>{closeDrawer();openAuth('login')}}}
+function updateAuth(){
+  if(me){
+    $('#loginBtn').classList.add('hidden');
+    $('#profileWrap').classList.remove('hidden');
+    $('#profileName').textContent=me.name||'Student';
+    $('#profilePhone').textContent=me.phone||'';
+    const avatar=$('#avatarBtn');
+    const wanted=me.photo||'';
+    const current=avatar.querySelector('img')?.getAttribute('src')||'';
+    if(wanted){
+      if(current!==wanted) avatar.innerHTML='<img src="'+esc(wanted)+'" alt="Profile" style="width:38px;height:38px;border-radius:50%;object-fit:cover">';
+    }else if(avatar.querySelector('img')){
+      avatar.textContent=(me.name||'S').trim().charAt(0).toUpperCase();
+    }else if(!avatar.textContent.trim()){
+      avatar.textContent=(me.name||'S').trim().charAt(0).toUpperCase();
+    }
+    $('#drawerLogin').textContent='Logout';
+    $('#drawerLogin').onclick=logout;
+  }else{
+    $('#loginBtn').classList.remove('hidden');
+    $('#profileWrap').classList.add('hidden');
+    $('#drawerLogin').textContent='Login';
+    $('#drawerLogin').onclick=()=>{closeDrawer();openAuth('login')}
+  }
+}
 async function logout(){try{await api('/api/student/logout',{method:'POST'})}catch{}me=null;try{data=await api('/api/public');applySettings();applyCoursePricing()}catch{}updateAuth();show('home',false)}
 $('#avatarBtn').onclick=()=>$('#profileMenu').classList.toggle('open');document.addEventListener('click',e=>{if(!e.target.closest('.profile-wrap'))$('#profileMenu').classList.remove('open')});$('#logoutBtn').onclick=logout;
 $$('[data-profile]').forEach(b=>b.onclick=()=>{if(!me){openAuth('login');return}go(b.dataset.profile)});
@@ -166,7 +190,20 @@ function urlBase64ToUint8Array(base64){const padding='='.repeat((4-base64.length
 function updateNotifyButton(){const b=$('#heroNotify');if(!b)return;if('Notification' in window&&Notification.permission==='granted'){b.textContent='🔔 Get Notified';b.classList.add('primary');b.classList.remove('ghost')}else{b.textContent='🔔 Get Notifications';b.classList.remove('primary');b.classList.add('ghost')}}
 $('#heroNotify').onclick=setupBrowserNotifications;
 async function load(){try{data=await api('/api/public');setCourses(data.courses||[]);me=data.currentStudent||await api('/api/student/me');}catch{try{data=await api('/api/public');me=data.currentStudent||null}catch{}}applySettings();applyCoursePricing();updateAuth();updateNotifyButton();renderNotifications();renderComments();renderHomeFaculty();renderCourses();renderAffairs();renderRailway();renderMock();renderFaculty();renderSuccess();renderLive();show(route(),true)}
-load();setInterval(async()=>{try{data=await api('/api/public');renderNotifications();if(route()==='live-class')renderLive()}catch{}},5000);document.getElementById('year').textContent=new Date().getFullYear();
+load();let lastLiveState='';
+setInterval(async()=>{
+  try{
+    const fresh=await api('/api/public');
+    const nextLive=JSON.stringify(fresh.settings?.live||{});
+    const liveChanged=nextLive!==lastLiveState;
+    data=fresh;
+    setCourses(data.courses||[]);
+    renderNotifications();
+    if(liveChanged){lastLiveState=nextLive;if(route()==='live-class')renderLive();}
+    if(route()==='railway-notifications')renderRailway();
+    if(route()==='mock-tests')renderMock();
+  }catch{}
+},5000);document.getElementById('year').textContent=new Date().getFullYear();
 </script>
 <div class="modal-backdrop" id="simpleModal" onclick="if(event.target.id==='simpleModal')closeSimpleModal()"></div>
 </body></html>
