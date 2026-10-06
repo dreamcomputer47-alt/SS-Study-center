@@ -152,6 +152,55 @@ app.post('/api/comments',(req,res)=>{
   const item={id:id(),name:name||'Student',message,createdAt:new Date().toISOString()};
   db.comments.push(item); saveData(); res.json(item);
 });
+app.get('/api/admin/content',auth,(req,res)=>{
+  const courses=courseCatalog().map(x=>({...x,price:Number(db.settings?.coursePricing?.[x.id])||0,paid:(Number(db.settings?.coursePricing?.[x.id])||0)>0}));
+  res.json({...db,settings:{...db.settings,coursePricing:db.settings?.coursePricing||{}},courses,push:{enabled:!!webpush&&!!vapidKeys,subscribers:(db.pushSubscriptions||[]).length}});
+});
+
+app.post('/api/admin/course',auth,upload.single('cover'),(req,res)=>{
+  const name=String(req.body.name||'').trim().slice(0,150);
+  if(!name) return res.status(400).json({error:'Course name required'});
+  if(!req.file || !req.file.mimetype.startsWith('image/')){
+    if(req.file) try{fs.unlinkSync(req.file.path)}catch{}
+    return res.status(400).json({error:'Course thumbnail / cover image required'});
+  }
+  const rawId=String(req.body.id||'').trim().toLowerCase();
+  const courseId=(rawId||name).replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,80);
+  if(!courseId) return res.status(400).json({error:'Valid Course ID required'});
+  if(courseCatalog().some(c=>c.id===courseId)){
+    try{fs.unlinkSync(req.file.path)}catch{}
+    return res.status(409).json({error:'Course ID already exists'});
+  }
+  const subjectNames=String(req.body.subjectNames||'').split(',').map(x=>x.trim()).filter(Boolean).slice(0,20);
+  if(!subjectNames.length){ try{fs.unlinkSync(req.file.path)}catch{}; return res.status(400).json({error:'At least one subject required'}); }
+  const subjects=subjectNames.map(n=>[n.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,''),n]);
+  const item={id:courseId,name,icon:String(req.body.icon||'📚').slice(0,8),desc:String(req.body.desc||'').trim().slice(0,1000),subjects,cover:'/uploads/'+req.file.filename,createdAt:new Date().toISOString()};
+  db.settings={...defaultData.settings,...db.settings,courseCatalog:[...courseCatalog(),item],coursePricing:{...(db.settings?.coursePricing||{}),[courseId]:Math.max(0,Number(req.body.price)||0)}};
+  saveData();
+  addNotification({title:'📚 নতুন Course publish হয়েছে',message:item.name+' — SS Study Centre-এ নতুন course যোগ হয়েছে।',url:'#courses'});
+  res.json({...item,price:db.settings.coursePricing[courseId],paid:db.settings.coursePricing[courseId]>0});
+});
+
+app.post('/api/admin/course/:id',auth,(req,res)=>{
+  const courseId=String(req.params.id||'');
+  const item=courseCatalog().find(c=>c.id===courseId);
+  if(!item) return res.status(404).json({error:'Course not found'});
+  const price=Math.max(0,Number(req.body?.price)||0);
+  db.settings={...defaultData.settings,...db.settings,coursePricing:{...(db.settings?.coursePricing||{}),[courseId]:price}};
+  saveData(); res.json({...item,price,paid:price>0});
+});
+
+app.delete('/api/admin/course/:id',auth,(req,res)=>{
+  const courseId=String(req.params.id||'');
+  if(['ncert-science','mathematics','railway-pyq','technical','reasoning','gk-gs'].includes(courseId)) return res.status(400).json({error:'Default course cannot be deleted'});
+  const list=courseCatalog(); const i=list.findIndex(c=>c.id===courseId);
+  if(i<0) return res.status(404).json({error:'Course not found'});
+  const [item]=list.splice(i,1); removeFile(item.cover);
+  const pricing={...(db.settings?.coursePricing||{})}; delete pricing[courseId];
+  db.settings={...defaultData.settings,...db.settings,courseCatalog:list,coursePricing:pricing};
+  saveData(); res.json({ok:true});
+});
+
 app.post('/api/admin/settings',auth,(req,res)=>{
   const b=req.body||{};
   const wasLive=!!db.settings?.live?.active;
