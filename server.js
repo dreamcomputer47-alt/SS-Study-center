@@ -20,8 +20,31 @@ fs.mkdirSync(UPLOADS, {recursive:true});
 fs.mkdirSync(DATA_DIR, {recursive:true});
 
 const defaultFaculty = [{"id":"surajit","name":"Surajit Sarkar","subjects":"Math & GK","role":"MAIN TEACHER • SCIENCE & GK SPECIALIST","desc":"NCERT Science, Physics, Chemistry, Biology এবং General Knowledge-এর exam-oriented preparation। Railway Group D, NTPC, ALP, JE ও অন্যান্য competitive government exam-এর জন্য concept clarity এবং practice-focused teaching.","tags":["Science","GK","NCERT","Railway","PYQ"],"featured":true,"image":"/uploads/surajit-sir.jpg"},{"id":"palash","name":"Palash Sir","subjects":"Math & Science","role":"FACULTY • MATH & SCIENCE","desc":"Mathematics ও Science-এর concept-based preparation.","tags":["Math","Science"],"featured":false,"image":""},{"id":"raju","name":"Raju Sir","subjects":"Math & GK","role":"FACULTY • MATH & GK","desc":"Mathematics এবং General Knowledge-এর exam-focused classes.","tags":["Math","GK"],"featured":false,"image":""},{"id":"raja","name":"Raja Sir","subjects":"Math & Reasoning","role":"FACULTY • MATH & REASONING","desc":"Mathematics ও Reasoning-এর practice এবং problem solving.","tags":["Math","Reasoning"],"featured":false,"image":""},{"id":"gopal","name":"Gopal Sir","subjects":"Math & Reasoning","role":"FACULTY • MATH & REASONING","desc":"Mathematics ও Reasoning-এর নিয়মিত practice ও shortcuts.","tags":["Math","Reasoning"],"featured":false,"image":""},{"id":"papai","name":"Papai Sir","subjects":"Math & Reasoning","role":"FACULTY • MATH & REASONING","desc":"Mathematics ও Reasoning-এর competitive exam preparation.","tags":["Math","Reasoning"],"featured":false,"image":""}];
-const defaultData = {videos: [], affairs: [], assets: [], achievers: [], comments: [], notifications: [], pushSubscriptions: [], faculty: defaultFaculty, settings: {phone:'+91 96149 41455', youtube:'https://youtube.com/@scienceexpressbysurajit', facebook:'https://www.facebook.com/share/1F21diM9hD/', telegram:'https://t.me/+lDDwpgOh3FM4MDk1', logo:'', banner:'', live:{active:false,title:'SS Study Centre Live Class',description:'Live classes for Railway and Government Job preparation.',youtubeUrl:'',schedule:''}}};
-function loadData(){ try { const saved=JSON.parse(fs.readFileSync(DATA_FILE,'utf8')); return {...defaultData, ...saved, settings:{...defaultData.settings,...(saved.settings||{})}, faculty:Array.isArray(saved.faculty)&&saved.faculty.length?saved.faculty:defaultFaculty.map(x=>({...x}))}; } catch { return {...defaultData, settings:{...defaultData.settings}, faculty:defaultFaculty.map(x=>({...x}))}; } }
+const defaultCourses = [
+  {id:'ncert-science',name:'NCERT Science',icon:'⚛',desc:'Physics, Chemistry ও Biology — সব আলাদা subject.',subjects:[['physics','Physics'],['chemistry','Chemistry'],['biology','Biology']]},
+  {id:'mathematics',name:'Mathematics',icon:'➗',desc:'Math concept, shortcut ও Railway practice.',subjects:[['maths','Mathematics']]},
+  {id:'railway-pyq',name:'Railway PYQ',icon:'🚆',desc:'Previous Year Questions ও pattern-based practice.',subjects:[['railway','Railway PYQ']]},
+  {id:'technical',name:'Technical',icon:'⚙',desc:'Technical / ITI exam preparation.',subjects:[['technical','Technical']]},
+  {id:'reasoning',name:'Reasoning',icon:'🧠',desc:'Reasoning chapter-wise practice.',subjects:[['reasoning','Reasoning']]},
+  {id:'gk-gs',name:'GK / GS',icon:'🌍',desc:'General Knowledge & General Studies.',subjects:[['gk','GK / GS']]}
+];
+const defaultData = {videos: [], affairs: [], assets: [], achievers: [], comments: [], notifications: [], pushSubscriptions: [], faculty: defaultFaculty, settings: {courseCatalog: defaultCourses, coursePricing:{}, phone:'+91 96149 41455', youtube:'https://youtube.com/@scienceexpressbysurajit', facebook:'https://www.facebook.com/share/1F21diM9hD/', telegram:'https://t.me/+lDDwpgOh3FM4MDk1', logo:'', banner:'', live:{active:false,title:'SS Study Centre Live Class',description:'Live classes for Railway and Government Job preparation.',youtubeUrl:'',schedule:''}}};
+function courseCatalog(){ return Array.isArray(db.settings?.courseCatalog)&&db.settings.courseCatalog.length ? db.settings.courseCatalog : defaultCourses; }
+function courseForVideo(v){
+  if(v.course) return String(v.course);
+  const ch=String(v.chapter||v.subject||'').toLowerCase();
+  if(['physics','chemistry','biology'].includes(ch)) return 'ncert-science';
+  if(ch==='maths') return 'mathematics';
+  if(ch==='railway') return 'railway-pyq';
+  if(ch==='technical') return 'technical';
+  if(ch==='reasoning') return 'reasoning';
+  if(ch==='gk') return 'gk-gs';
+  return 'ncert-science';
+}
+function subjectForVideo(v){
+  return String(v.subject||v.chapter||'general');
+}
+function loadData(){ try { const saved=JSON.parse(fs.readFileSync(DATA_FILE,'utf8')); return {...defaultData, ...saved, settings:{...defaultData.settings,...(saved.settings||{}),courseCatalog:Array.isArray(saved.settings?.courseCatalog)&&saved.settings.courseCatalog.length?saved.settings.courseCatalog:defaultCourses}, faculty:Array.isArray(saved.faculty)&&saved.faculty.length?saved.faculty:defaultFaculty.map(x=>({...x}))}; } catch { return {...defaultData, settings:{...defaultData.settings}, faculty:defaultFaculty.map(x=>({...x}))}; } }
 let db = loadData();
 db.pushSubscriptions = Array.isArray(db.pushSubscriptions) ? db.pushSubscriptions : [];
 function getVapidKeys(){
@@ -55,6 +78,7 @@ const upload = multer({storage, limits:{fileSize: 2*1024*1024*1024}});
 
 app.use(express.json({limit:'2mb'}));
 app.use('/uploads', express.static(UPLOADS, {maxAge:'7d'}));
+app.use(express.static(PUBLIC, {maxAge:'1h'}));
 
 app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',time:new Date().toISOString()}));
 app.get('/api/public', (req,res)=>{
@@ -67,8 +91,16 @@ app.get('/api/public', (req,res)=>{
     notifications: (db.notifications||[]).slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,30),
     faculty: db.faculty || defaultFaculty,
     settings: db.settings,
+    courses: courseCatalog().map(x=>({...x,price:Number(db.settings?.coursePricing?.[x.id])||0,paid:(Number(db.settings?.coursePricing?.[x.id])||0)>0})),
     push: {enabled: !!webpush && !!vapidKeys, publicKey: vapidKeys?.publicKey || '', subscribers: db.pushSubscriptions.length}
   });
+});
+app.get('/api/student/course/:courseId',(req,res)=>{
+  const courseId=String(req.params.courseId||'');
+  const course=courseCatalog().find(x=>x.id===courseId);
+  if(!course) return res.status(404).json({error:'Course not found'});
+  const videos=(db.videos||[]).map(v=>({...v,course:courseForVideo(v),subject:subjectForVideo(v)})).filter(v=>v.course===courseId);
+  res.json({course:{...course,price:Number(db.settings?.coursePricing?.[courseId])||0,paid:(Number(db.settings?.coursePricing?.[courseId])||0)>0},videos});
 });
 app.post('/api/admin/login',(req,res)=>{
   if(String(req.body.password||'') !== ADMIN_PASSWORD) return res.status(401).json({error:'Wrong password'});
