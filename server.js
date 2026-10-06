@@ -105,12 +105,16 @@ app.get('/api/public', (req,res)=>{
     push: {enabled: !!webpush && !!vapidKeys, publicKey: vapidKeys?.publicKey || '', subscribers: db.pushSubscriptions.length}
   });
 });
-app.get('/api/student/course/:courseId',(req,res)=>{
+app.get('/api/student/course/:courseId',studentAuth,(req,res)=>{
   const courseId=String(req.params.courseId||'');
   const course=courseCatalog().find(x=>x.id===courseId);
   if(!course) return res.status(404).json({error:'Course not found'});
+  const price=Number(db.settings?.coursePricing?.[courseId])||0;
+  const paid=price>0;
+  const purchased=Array.isArray(req.student.purchases)&&req.student.purchases.includes(courseId);
+  if(paid&&!purchased) return res.status(403).json({error:'Course purchase/approval required',courseId,price,paid:true});
   const videos=(db.videos||[]).map(v=>({...v,course:courseForVideo(v),subject:subjectForVideo(v)})).filter(v=>v.course===courseId);
-  res.json({course:{...course,price:Number(db.settings?.coursePricing?.[courseId])||0,paid:(Number(db.settings?.coursePricing?.[courseId])||0)>0},videos});
+  res.json({course:{...course,price,paid,purchased},videos});
 });
 app.get('/api/student/me',(req,res)=>{ const s=currentStudent(req); if(!s) return res.status(401).json({error:'login required'}); if(s.blocked) return res.status(403).json({error:'blocked'}); res.json(studentView(s)); });
 app.post('/api/student/register',(req,res)=>{
