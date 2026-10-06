@@ -287,7 +287,7 @@ app.post('/api/admin/youtube',auth,upload.single('pdf'),(req,res)=>{
 app.post('/api/admin/video',auth,upload.fields([{name:'video',maxCount:1},{name:'pdf',maxCount:1},{name:'thumbnail',maxCount:1}]),(req,res)=>{
   const video=req.files?.video?.[0], pdf=req.files?.pdf?.[0], thumbnail=req.files?.thumbnail?.[0];
   if(!video)return res.status(400).json({error:'Video file required'});
-  if(!/^video\\//.test(video.mimetype)){try{fs.unlinkSync(video.path)}catch{};return res.status(400).json({error:'Please upload a video file'});}
+  if(!/^video\//.test(video.mimetype)){try{fs.unlinkSync(video.path)}catch{};return res.status(400).json({error:'Please upload a video file'});}
   const item={id:id(),kind:'file',title:String(req.body.title||video.originalname),course:String(req.body.course||'ncert-science'),subject:String(req.body.subject||'physics'),chapter:String(req.body.chapterName||req.body.chapter||''),desc:String(req.body.desc||''),url:'/uploads/'+video.filename,originalName:video.originalname,size:video.size,mime:video.mimetype,pdf:pdf?'/uploads/'+pdf.filename:null,thumbnail:thumbnail?'/uploads/'+thumbnail.filename:null,createdAt:new Date().toISOString()};
   db.videos.push(item);saveData();addNotification({title:'🎬 নতুন class/video আপলোড হয়েছে',message:item.title,url:'#courses'});res.json(item);
 });
