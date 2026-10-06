@@ -94,6 +94,7 @@ app.use(express.static(PUBLIC, {maxAge:'1h'}));
 app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',time:new Date().toISOString()}));
 app.get('/api/public', (req,res)=>{
   const publicStudent=currentStudent(req);
+  let paymentQRDataUrl=''; try { const q=String(db.settings?.paymentQR||''); const qp=q.startsWith('/uploads/')?path.join(ROOT,q.replace(/^\//,'')):''; if(qp && fs.existsSync(qp)){ const ext=path.extname(qp).toLowerCase(); const mime=ext==='.png'?'image/png':ext==='.webp'?'image/webp':'image/jpeg'; paymentQRDataUrl='data:'+mime+';base64,'+fs.readFileSync(qp).toString('base64'); } } catch {}
   res.json({
     currentStudent: studentView(publicStudent),
     courseAccess: publicStudent ? Object.fromEntries((publicStudent.purchases||[]).map(id=>[id,true])) : {},
@@ -107,7 +108,7 @@ app.get('/api/public', (req,res)=>{
     comments: db.comments.slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,100),
     notifications: (db.notifications||[]).filter(n=>!n.courseId || (publicStudent && (publicStudent.purchases||[]).includes(n.courseId))).slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,30),
     faculty: db.faculty || defaultFaculty,
-    settings: db.settings,
+    settings: {...db.settings,paymentQRDataUrl},
     courses: courseCatalog().map(x=>({...x,price:Number(db.settings?.coursePricing?.[x.id])||0,paid:(Number(db.settings?.coursePricing?.[x.id])||0)>0})),
     push: {enabled: !!webpush && !!vapidKeys, publicKey: vapidKeys?.publicKey || '', subscribers: db.pushSubscriptions.length}
   });
