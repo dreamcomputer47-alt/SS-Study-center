@@ -101,7 +101,7 @@ app.get('/media/:file', (req,res)=>{
   res.setHeader('Content-Type',mime); res.setHeader('Accept-Ranges','bytes'); res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
   const range=req.headers.range;
   if(!range) { res.setHeader('Content-Length',size); return fs.createReadStream(file).pipe(res); }
-  const m=/bytes=(\\d*)-(\\d*)/.exec(range);
+  const m=/bytes=(\d*)-(\d*)/.exec(range);
   if(!m) return res.status(416).setHeader('Content-Range','bytes */'+size).end();
   let start=m[1]?Number(m[1]):0; let end=m[2]?Number(m[2]):size-1;
   if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=size) return res.status(416).setHeader('Content-Range','bytes */'+size).end();
