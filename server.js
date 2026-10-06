@@ -97,6 +97,8 @@ app.get('/api/public', (req,res)=>{
     affairs: db.affairs.map(a=>({...a})),
     assets: db.assets.map(a=>({...a})),
     achievers: db.achievers.map(a=>({...a})),
+    railwayNotifications: (db.railwayNotifications||[]).map(x=>({...x})),
+    mockTests: (db.mockTests||[]).map(x=>({...x,questions:(x.questions||[]).map(q=>({...q,solutionImage:undefined}))})),
     comments: db.comments.slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,100),
     notifications: (db.notifications||[]).filter(n=>!n.courseId || (publicStudent && (publicStudent.purchases||[]).includes(n.courseId))).slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,30),
     faculty: db.faculty || defaultFaculty,
@@ -137,6 +139,21 @@ app.post('/api/student/save',studentAuth,(req,res)=>{ const cid=String(req.body?
 app.post('/api/student/profile',studentAuth,upload.single('photo'),(req,res)=>{ if(req.body.name!==undefined) req.student.name=String(req.body.name).trim().slice(0,100); if(req.body.dob!==undefined)req.student.dob=String(req.body.dob); if(req.body.gender!==undefined)req.student.gender=String(req.body.gender); if(req.file){if(!req.file.mimetype.startsWith('image/')){try{fs.unlinkSync(req.file.path)}catch{};return res.status(400).json({error:'Profile photo must be image'});} removeFile(req.student.photo); req.student.photo='/uploads/'+req.file.filename;} saveData(); res.json(studentView(req.student)); });
 app.post('/api/student/purchase-request',studentAuth,(req,res)=>{ const courseId=String(req.body?.courseId||''); const c=courseCatalog().find(x=>x.id===courseId); if(!c)return res.status(404).json({error:'Course not found'}); const price=Number(db.settings?.coursePricing?.[courseId])||0; if(price<=0){req.student.purchases=req.student.purchases||[];if(!req.student.purchases.includes(courseId))req.student.purchases.push(courseId);saveData();return res.json({ok:true,free:true});} db.purchaseRequests=db.purchaseRequests||[]; const pending=db.purchaseRequests.find(x=>x.studentId===req.student.id&&x.courseId===courseId&&x.status==='pending'); if(pending)return res.status(409).json({error:'Purchase request already submitted'}); const item={id:id(),studentId:req.student.id,studentName:req.student.name,phone:req.student.phone,courseId,transactionId:String(req.body?.utr||'').trim(),utr:String(req.body?.utr||'').trim(),status:'pending',createdAt:new Date().toISOString()}; db.purchaseRequests.push(item);saveData();res.json(item); });
 app.get('/api/student/mock-tests/:id',(req,res)=>{const x=(db.mockTests||[]).find(x=>x.id===req.params.id);if(!x)return res.status(404).json({error:'Mock test not found'});res.json(x);});
+app.post('/api/student/mock-tests/:id/submit',studentAuth,(req,res)=>{
+  const x=(db.mockTests||[]).find(x=>x.id===req.params.id);
+  if(!x)return res.status(404).json({error:'Mock test not found'});
+  const answers=Array.isArray(req.body?.answers)?req.body.answers:[];
+  const questions=x.questions||[];
+  let score=0;
+  const resultQuestions=questions.map((q,i)=>{
+    const raw=answers[i];
+    const studentAnswer=(raw===null||raw===undefined||raw==='')?null:Number(raw);
+    if(studentAnswer!==null && studentAnswer===Number(q.answer)) score++;
+    return {q:q.q,options:q.options||[],correctAnswer:Number(q.answer),studentAnswer,solution:q.solutionImage||null};
+  });
+  res.json({testId:x.id,title:x.title,score,total:questions.length,questions:resultQuestions});
+});
+
 
 app.post('/api/admin/login',(req,res)=>{
   if(String(req.body.password||'') !== ADMIN_PASSWORD) return res.status(401).json({error:'Wrong password'});
