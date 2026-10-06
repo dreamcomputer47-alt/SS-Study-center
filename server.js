@@ -60,8 +60,8 @@ function sendPush(payload){
   const body=JSON.stringify(payload);
   db.pushSubscriptions.slice().forEach(sub=>webpush.sendNotification(sub, body).catch(err=>{ if(err && (err.statusCode===404 || err.statusCode===410)){ db.pushSubscriptions=db.pushSubscriptions.filter(x=>x.endpoint!==sub.endpoint); saveData(); } }));
 }
-function addNotification({type='notice',title,message,url='#',push=true}){
-  const item={id:id(),type,title,message,url:String(url||'#').slice(0,300),createdAt:new Date().toISOString()};
+function addNotification({type='notice',title,message,url='#',push=true,courseId=''}){
+  const item={id:id(),type,title,message,url:String(url||'#').slice(0,300),courseId:String(courseId||''),createdAt:new Date().toISOString()};
   db.notifications=db.notifications||[]; db.notifications.push(item); saveData();
   if(push) sendPush({title:item.title,body:item.message,url:item.url,tag:item.id});
   return item;
@@ -98,7 +98,7 @@ app.get('/api/public', (req,res)=>{
     assets: db.assets.map(a=>({...a})),
     achievers: db.achievers.map(a=>({...a})),
     comments: db.comments.slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,100),
-    notifications: (db.notifications||[]).slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,30),
+    notifications: (db.notifications||[]).filter(n=>!n.courseId || (publicStudent && (publicStudent.purchases||[]).includes(n.courseId))).slice().sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,30),
     faculty: db.faculty || defaultFaculty,
     settings: db.settings,
     courses: courseCatalog().map(x=>({...x,price:Number(db.settings?.coursePricing?.[x.id])||0,paid:(Number(db.settings?.coursePricing?.[x.id])||0)>0})),
@@ -276,9 +276,14 @@ app.post('/api/admin/notification',auth,(req,res)=>{
   const title=String(req.body.title||'SS Study Centre Update').trim().slice(0,120);
   const message=String(req.body.message||'').trim().slice(0,500);
   if(!message)return res.status(400).json({error:'Notification message required'});
-  const item=addNotification({type:'notice',title,message,url:req.body.url||'#'}); res.json(item);
+  const courseId=String(req.body.courseId||'');
+  if(courseId && !courseCatalog().some(c=>c.id===courseId)) return res.status(400).json({error:'Invalid course'});
+  const item=addNotification({type:'notice',title,message,url:req.body.url||'#',courseId}); res.json(item);
 });
 app.delete('/api/admin/notifications/:id',auth,(req,res)=>{const i=(db.notifications||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);db.notifications.splice(i,1);saveData();res.json({ok:true});});
+app.delete('/api/admin/railway-notifications/:id',auth,(req,res)=>{const i=(db.railwayNotifications||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [x]=db.railwayNotifications.splice(i,1);removeFile(x.file);saveData();res.json({ok:true});});
+app.delete('/api/admin/mock-tests/:id',auth,(req,res)=>{const i=(db.mockTests||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [x]=db.mockTests.splice(i,1);(x.questions||[]).forEach(q=>removeFile(q.solutionImage));saveData();res.json({ok:true});});
+
 app.post('/api/admin/achiever',auth,upload.single('image'),(req,res)=>{
   if(!req.file || !req.file.mimetype.startsWith('image/')) return res.status(400).json({error:'Student photo required'});
   const item={id:id(),name:String(req.body.name||'Student'),detail:String(req.body.detail||''),year:String(req.body.year||''),url:'/uploads/'+req.file.filename,createdAt:new Date().toISOString()};
