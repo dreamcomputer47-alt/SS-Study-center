@@ -28,7 +28,7 @@ const defaultCourses = [
   {id:'reasoning',name:'Reasoning',icon:'🧠',desc:'Reasoning chapter-wise practice.',subjects:[['reasoning','Reasoning']]},
   {id:'gk-gs',name:'GK / GS',icon:'🌍',desc:'General Knowledge & General Studies.',subjects:[['gk','GK / GS']]}
 ];
-const defaultData = {videos: [], affairs: [], assets: [], achievers: [], comments: [], notifications: [], pushSubscriptions: [], faculty: defaultFaculty, settings: {courseCatalog: defaultCourses, coursePricing:{}, phone:'+91 96149 41455', youtube:'https://youtube.com/@scienceexpressbysurajit', facebook:'https://www.facebook.com/share/1F21diM9hD/', telegram:'https://t.me/+lDDwpgOh3FM4MDk1', logo:'', banner:'', live:{active:false,title:'SS Study Centre Live Class',description:'Live classes for Railway and Government Job preparation.',youtubeUrl:'',schedule:''}}};
+const defaultData = {videos: [], affairs: [], assets: [], achievers: [], comments: [], notifications: [], pushSubscriptions: [], students: [], purchaseRequests: [], mockTests: [], railwayNotifications: [], faculty: defaultFaculty, settings: {courseCatalog: defaultCourses, coursePricing:{}, phone:'+91 96149 41455', youtube:'https://youtube.com/@scienceexpressbysurajit', facebook:'https://www.facebook.com/share/1F21diM9hD/', telegram:'https://t.me/+lDDwpgOh3FM4MDk1', logo:'', banner:'', live:{active:false,title:'SS Study Centre Live Class',description:'Live classes for Railway and Government Job preparation.',youtubeUrl:'',schedule:''}}};
 function courseCatalog(){ return Array.isArray(db.settings?.courseCatalog)&&db.settings.courseCatalog.length ? db.settings.courseCatalog : defaultCourses; }
 function courseForVideo(v){
   if(v.course) return String(v.course);
@@ -69,6 +69,13 @@ function addNotification({type='notice',title,message,url='#',push=true}){
 function saveData(){ fs.writeFileSync(DATA_FILE, JSON.stringify(db,null,2)); }
 function id(){ return crypto.randomUUID(); }
 function safeName(original){ return Date.now()+'-'+crypto.randomBytes(5).toString('hex')+'-'+path.basename(original).replace(/[^a-zA-Z0-9._-]/g,'_'); }
+const studentSessions = new Map();
+function studentToken(req){ const h=req.headers.cookie||''; const m=h.match(/ss_student=([^;]+)/); return m ? m[1] : ''; }
+function hashPassword(p){ return crypto.createHash('sha256').update(String(p||'')).digest('hex'); }
+function currentStudent(req){ const sid=studentSessions.get(studentToken(req)); if(!sid) return null; return (db.students||[]).find(s=>s.id===sid) || null; }
+function studentView(s){ if(!s) return null; const {passwordHash,securityAnswerHash,...safe}=s; return safe; }
+function studentAuth(req,res,next){ const s=currentStudent(req); if(!s) return res.status(401).json({error:'login required'}); if(s.blocked) return res.status(403).json({error:'Student blocked'}); req.student=s; next(); }
+
 function cookieToken(req){ const h=req.headers.cookie||''; const m=h.match(/ss_admin=([^;]+)/); return m ? m[1] : ''; }
 const sessions = new Set();
 function auth(req,res,next){ if(!sessions.has(cookieToken(req))) return res.status(401).json({error:'Unauthorized'}); next(); }
@@ -82,7 +89,10 @@ app.use(express.static(PUBLIC, {maxAge:'1h'}));
 
 app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',time:new Date().toISOString()}));
 app.get('/api/public', (req,res)=>{
+  const publicStudent=currentStudent(req);
   res.json({
+    currentStudent: studentView(publicStudent),
+    courseAccess: publicStudent ? Object.fromEntries((publicStudent.purchases||[]).map(id=>[id,true])) : {},
     videos: db.videos.map(v=>({...v})),
     affairs: db.affairs.map(a=>({...a})),
     assets: db.assets.map(a=>({...a})),
@@ -102,6 +112,23 @@ app.get('/api/student/course/:courseId',(req,res)=>{
   const videos=(db.videos||[]).map(v=>({...v,course:courseForVideo(v),subject:subjectForVideo(v)})).filter(v=>v.course===courseId);
   res.json({course:{...course,price:Number(db.settings?.coursePricing?.[courseId])||0,paid:(Number(db.settings?.coursePricing?.[courseId])||0)>0},videos});
 });
+app.get('/api/student/me',(req,res)=>{ const s=currentStudent(req); if(!s) return res.status(401).json({error:'login required'}); if(s.blocked) return res.status(403).json({error:'blocked'}); res.json(studentView(s)); });
+app.post('/api/student/register',(req,res)=>{
+  const name=String(req.body?.name||'').trim().slice(0,100), phone=String(req.body?.phone||'').replace(/\\D/g,'').slice(-10), password=String(req.body?.password||'');
+  if(!name||phone.length!==10||password.length<4) return res.status(400).json({error:'Name, valid 10 digit phone and password required'});
+  db.students=db.students||[]; if(db.students.some(s=>s.phone===phone)) return res.status(409).json({error:'Phone already registered'});
+  const s={id:id(),name,phone,dob:String(req.body?.dob||''),gender:String(req.body?.gender||''),passwordHash:hashPassword(password),securityQuestion:String(req.body?.securityQuestion||''),securityAnswerHash:hashPassword(String(req.body?.securityAnswer||'').trim().toLowerCase()),purchases:[],saved:[],photo:'',blocked:false,createdAt:new Date().toISOString()};
+  db.students.push(s); saveData(); const token=crypto.randomBytes(32).toString('hex'); studentSessions.set(token,s.id); res.setHeader('Set-Cookie',`ss_student=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json(studentView(s));
+});
+app.post('/api/student/login',(req,res)=>{ const phone=String(req.body?.phone||'').replace(/\\D/g,'').slice(-10), password=String(req.body?.password||''); const s=(db.students||[]).find(x=>x.phone===phone); if(!s||s.passwordHash!==hashPassword(password)) return res.status(401).json({error:'Wrong phone or password'}); if(s.blocked) return res.status(403).json({error:'Student blocked'}); const token=crypto.randomBytes(32).toString('hex'); studentSessions.set(token,s.id); res.setHeader('Set-Cookie',`ss_student=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json(studentView(s)); });
+app.post('/api/student/logout',(req,res)=>{ studentSessions.delete(studentToken(req)); res.setHeader('Set-Cookie',`ss_student=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true}); });
+app.post('/api/student/security-question',(req,res)=>{ const phone=String(req.body?.phone||'').replace(/\\D/g,'').slice(-10); const s=(db.students||[]).find(x=>x.phone===phone); if(!s) return res.status(404).json({error:'Student not found'}); res.json({question:s.securityQuestion}); });
+app.post('/api/student/forgot-password',(req,res)=>{ const phone=String(req.body?.phone||'').replace(/\\D/g,'').slice(-10); const s=(db.students||[]).find(x=>x.phone===phone); if(!s||s.securityAnswerHash!==hashPassword(String(req.body?.securityAnswer||'').trim().toLowerCase())) return res.status(400).json({error:'Security answer incorrect'}); const np=String(req.body?.newPassword||''); if(np.length<4)return res.status(400).json({error:'New password must be at least 4 characters'}); s.passwordHash=hashPassword(np); saveData(); res.json({ok:true}); });
+app.post('/api/student/save',studentAuth,(req,res)=>{ const cid=String(req.body?.contentId||''); req.student.saved=req.student.saved||[]; req.student.saved=req.student.saved.includes(cid)?req.student.saved.filter(x=>x!==cid):[...req.student.saved,cid]; saveData(); res.json(studentView(req.student)); });
+app.post('/api/student/profile',studentAuth,upload.single('photo'),(req,res)=>{ if(req.body.name!==undefined) req.student.name=String(req.body.name).trim().slice(0,100); if(req.body.dob!==undefined)req.student.dob=String(req.body.dob); if(req.body.gender!==undefined)req.student.gender=String(req.body.gender); if(req.file){if(!req.file.mimetype.startsWith('image/')){try{fs.unlinkSync(req.file.path)}catch{};return res.status(400).json({error:'Profile photo must be image'});} removeFile(req.student.photo); req.student.photo='/uploads/'+req.file.filename;} saveData(); res.json(studentView(req.student)); });
+app.post('/api/student/purchase-request',studentAuth,(req,res)=>{ const courseId=String(req.body?.courseId||''); const c=courseCatalog().find(x=>x.id===courseId); if(!c)return res.status(404).json({error:'Course not found'}); const price=Number(db.settings?.coursePricing?.[courseId])||0; if(price<=0){req.student.purchases=req.student.purchases||[];if(!req.student.purchases.includes(courseId))req.student.purchases.push(courseId);saveData();return res.json({ok:true,free:true});} db.purchaseRequests=db.purchaseRequests||[]; const pending=db.purchaseRequests.find(x=>x.studentId===req.student.id&&x.courseId===courseId&&x.status==='pending'); if(pending)return res.status(409).json({error:'Purchase request already submitted'}); const item={id:id(),studentId:req.student.id,studentName:req.student.name,phone:req.student.phone,courseId,transactionId:String(req.body?.utr||'').trim(),utr:String(req.body?.utr||'').trim(),status:'pending',createdAt:new Date().toISOString()}; db.purchaseRequests.push(item);saveData();res.json(item); });
+app.get('/api/student/mock-tests/:id',(req,res)=>{const x=(db.mockTests||[]).find(x=>x.id===req.params.id);if(!x)return res.status(404).json({error:'Mock test not found'});res.json(x);});
+
 app.post('/api/admin/login',(req,res)=>{
   if(String(req.body.password||'') !== ADMIN_PASSWORD) return res.status(401).json({error:'Wrong password'});
   const token=crypto.randomBytes(32).toString('hex'); sessions.add(token);
@@ -201,6 +228,11 @@ app.delete('/api/admin/course/:id',auth,(req,res)=>{
   saveData(); res.json({ok:true});
 });
 
+app.get('/api/admin/students',auth,(req,res)=>res.json({students:(db.students||[]).map(studentView),purchaseRequests:db.purchaseRequests||[]}));
+app.post('/api/admin/students/:id/block',auth,(req,res)=>{const s=(db.students||[]).find(x=>x.id===req.params.id);if(!s)return res.status(404).json({error:'Student not found'});s.blocked=!!req.body?.blocked;saveData();res.json(studentView(s));});
+app.post('/api/admin/students/:id/access',auth,(req,res)=>{const s=(db.students||[]).find(x=>x.id===req.params.id);if(!s)return res.status(404).json({error:'Student not found'});const c=String(req.body?.courseId||'');if(!courseCatalog().some(x=>x.id===c))return res.status(404).json({error:'Course not found'});s.purchases=s.purchases||[];if(!s.purchases.includes(c))s.purchases.push(c);saveData();res.json(studentView(s));});
+app.post('/api/admin/purchase-requests/:id/approve',auth,(req,res)=>{const r=(db.purchaseRequests||[]).find(x=>x.id===req.params.id);if(!r)return res.status(404).json({error:'Purchase request not found'});const s=(db.students||[]).find(x=>x.id===r.studentId);if(!s)return res.status(404).json({error:'Student not found'});s.purchases=s.purchases||[];if(!s.purchases.includes(r.courseId))s.purchases.push(r.courseId);r.status='approved';r.approvedAt=new Date().toISOString();saveData();res.json({ok:true,student:studentView(s),request:r});});
+app.delete('/api/admin/purchase-requests/:id',auth,(req,res)=>{const i=(db.purchaseRequests||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);db.purchaseRequests.splice(i,1);saveData();res.json({ok:true});});
 app.post('/api/admin/settings',auth,(req,res)=>{
   const b=req.body||{};
   const wasLive=!!db.settings?.live?.active;
@@ -243,19 +275,19 @@ app.post('/api/admin/achiever',auth,upload.single('image'),(req,res)=>{
 app.delete('/api/admin/achievers/:id',auth,(req,res)=>{const i=db.achievers.findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [a]=db.achievers.splice(i,1);removeFile(a.url);saveData();res.json({ok:true});});
 app.delete('/api/admin/comments/:id',auth,(req,res)=>{const i=db.comments.findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);db.comments.splice(i,1);saveData();res.json({ok:true});});
 
-app.post('/api/admin/youtube',auth,(req,res)=>{
-  const {title,chapter,desc,url,id:videoId}=req.body;
-  const vid = videoId || extractYoutubeId(url||'');
-  if(!title || !vid) return res.status(400).json({error:'Title and valid YouTube URL/ID required'});
-  const item={id:id(), kind:'youtube', title:String(title), chapter:chapter||'physics', desc:String(desc||''), youtubeId:vid, createdAt:new Date().toISOString()};
-  db.videos.push(item); saveData(); addNotification({title:'🎬 নতুন class/video আপলোড হয়েছে',message:item.title,url:'#videos'}); res.json(item);
+app.post('/api/admin/youtube',auth,upload.single('pdf'),(req,res)=>{
+  const {title,desc,url,id:videoId}=req.body; const vid=videoId||extractYoutubeId(url||'');
+  if(!title||!vid){if(req.file)try{fs.unlinkSync(req.file.path)}catch{};return res.status(400).json({error:'Title and valid YouTube URL/ID required'});}
+  const item={id:id(),kind:'youtube',title:String(title),course:String(req.body.course||'ncert-science'),subject:String(req.body.subject||'physics'),chapter:String(req.body.chapterName||req.body.chapter||''),desc:String(desc||''),youtubeId:vid,pdf:req.file?'/uploads/'+req.file.filename:null,createdAt:new Date().toISOString()};
+  db.videos.push(item);saveData();addNotification({title:'🎬 নতুন class/video আপলোড হয়েছে',message:item.title,url:'#courses'});res.json(item);
 });
 
-app.post('/api/admin/video',auth,upload.single('video'),(req,res)=>{
-  if(!req.file) return res.status(400).json({error:'Video file required'});
-  if(!/^video\//.test(req.file.mimetype)) { fs.unlinkSync(req.file.path); return res.status(400).json({error:'Please upload a video file'}); }
-  const item={id:id(), kind:'file', title:String(req.body.title||req.file.originalname), chapter:req.body.chapter||'physics', desc:String(req.body.desc||''), url:'/uploads/'+req.file.filename, originalName:req.file.originalname, size:req.file.size, mime:req.file.mimetype, createdAt:new Date().toISOString()};
-  db.videos.push(item); saveData(); addNotification({title:'🎬 নতুন class/video আপলোড হয়েছে',message:item.title,url:'#videos'}); res.json(item);
+app.post('/api/admin/video',auth,upload.fields([{name:'video',maxCount:1},{name:'pdf',maxCount:1},{name:'thumbnail',maxCount:1}]),(req,res)=>{
+  const video=req.files?.video?.[0], pdf=req.files?.pdf?.[0], thumbnail=req.files?.thumbnail?.[0];
+  if(!video)return res.status(400).json({error:'Video file required'});
+  if(!/^video\\//.test(video.mimetype)){try{fs.unlinkSync(video.path)}catch{};return res.status(400).json({error:'Please upload a video file'});}
+  const item={id:id(),kind:'file',title:String(req.body.title||video.originalname),course:String(req.body.course||'ncert-science'),subject:String(req.body.subject||'physics'),chapter:String(req.body.chapterName||req.body.chapter||''),desc:String(req.body.desc||''),url:'/uploads/'+video.filename,originalName:video.originalname,size:video.size,mime:video.mimetype,pdf:pdf?'/uploads/'+pdf.filename:null,thumbnail:thumbnail?'/uploads/'+thumbnail.filename:null,createdAt:new Date().toISOString()};
+  db.videos.push(item);saveData();addNotification({title:'🎬 নতুন class/video আপলোড হয়েছে',message:item.title,url:'#courses'});res.json(item);
 });
 
 app.post('/api/admin/affair',auth,upload.fields([{name:'image',maxCount:1},{name:'pdf',maxCount:1}]),(req,res)=>{
