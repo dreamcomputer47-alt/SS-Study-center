@@ -89,6 +89,26 @@ const upload = multer({storage, limits:{fileSize: 2*1024*1024*1024}});
 
 app.use(express.json({limit:'2mb'}));
 app.use('/uploads', express.static(UPLOADS, {maxAge:'7d'}));
+
+// Reliable video streaming with HTTP Range support.
+app.get('/media/:file', (req,res)=>{
+  const name=path.basename(String(req.params.file||''));
+  const file=path.join(UPLOADS,name);
+  if(!fs.existsSync(file)) return res.status(404).end();
+  const ext=path.extname(file).toLowerCase();
+  const mime={'.mp4':'video/mp4','.webm':'video/webm','.ogg':'video/ogg','.mov':'video/quicktime','.m4v':'video/mp4'}[ext] || 'application/octet-stream';
+  const size=fs.statSync(file).size;
+  res.setHeader('Content-Type',mime); res.setHeader('Accept-Ranges','bytes'); res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+  const range=req.headers.range;
+  if(!range) { res.setHeader('Content-Length',size); return fs.createReadStream(file).pipe(res); }
+  const m=/bytes=(\\d*)-(\\d*)/.exec(range);
+  if(!m) return res.status(416).setHeader('Content-Range','bytes */'+size).end();
+  let start=m[1]?Number(m[1]):0; let end=m[2]?Number(m[2]):size-1;
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=size) return res.status(416).setHeader('Content-Range','bytes */'+size).end();
+  end=Math.min(end,size-1);
+  res.status(206); res.setHeader('Content-Range','bytes '+start+'-'+end+'/'+size); res.setHeader('Content-Length',end-start+1);
+  fs.createReadStream(file,{start,end}).pipe(res);
+});
 app.use(express.static(PUBLIC, {maxAge:'1h'}));
 
 app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',time:new Date().toISOString()}));
