@@ -1,8 +1,8 @@
 {
   "name": "ss-study-centre-website",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "SS Study Centre public website with private admin upload panel",
+  "description": "SS Study Centre professional student portal with course hierarchy, student login, saved content, purchase access and private admin panel",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
