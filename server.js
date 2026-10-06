@@ -237,8 +237,10 @@ app.post('/api/admin/settings',auth,(req,res)=>{
   const b=req.body||{};
   const wasLive=!!db.settings?.live?.active;
   const nextLive={...defaultData.settings.live,...(db.settings?.live||{}),active:!!b.liveActive,title:String(b.liveTitle ?? (db.settings.live.title || '')),description:String(b.liveDescription ?? (db.settings.live.description || '')),youtubeUrl:String(b.liveYoutubeUrl ?? (db.settings.live.youtubeUrl || '')),schedule:String(b.liveSchedule ?? (db.settings.live.schedule || ''))};
+  const incomingPricing = b.coursePricing!==undefined ? (typeof b.coursePricing==='string' ? (()=>{try{return JSON.parse(b.coursePricing)}catch{return {}}})() : (b.coursePricing||{})) : null;
   db.settings={...defaultData.settings,...db.settings,
     phone:String(b.phone ?? (db.settings.phone || '')),youtube:String(b.youtube ?? (db.settings.youtube || '')),facebook:String(b.facebook ?? (db.settings.facebook || '')),telegram:String(b.telegram ?? (db.settings.telegram || '')),
+    coursePricing: incomingPricing ? Object.fromEntries(Object.entries(incomingPricing).map(([k,v])=>[k,Math.max(0,Number(v)||0)])) : (db.settings.coursePricing||{}),
     live:nextLive};
   if(!wasLive && nextLive.active){
     addNotification({type:'live',title:'🔴 Live Class শুরু হয়েছে',message:nextLive.title||'SS Study Centre Live Class এখন চলছে।',url:'#live-class'});
