@@ -12,11 +12,39 @@ const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'SS@Admin2026';
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
-const UPLOADS = path.join(ROOT, 'uploads');
-const DATA_DIR = path.join(ROOT, 'data');
+// On Render, set STORAGE_ROOT to the persistent disk mount path
+// (recommended: /opt/render/project/src/storage). Locally, keep the
+// existing project folders so development remains backwards-compatible.
+const STORAGE_ROOT = path.resolve(process.env.STORAGE_ROOT || ROOT);
+const UPLOADS = path.join(STORAGE_ROOT, 'uploads');
+const DATA_DIR = path.join(STORAGE_ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'content.json');
-const PRIVATE_EBOOKS = path.join(ROOT, 'private-ebooks');
+const PRIVATE_EBOOKS = path.join(STORAGE_ROOT, 'private-ebooks');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
+
+// Best-effort migration: copy legacy local files into persistent storage
+// without overwriting files already present on the disk. This protects data
+// when the old filesystem is available during the first persistent deployment.
+function copyMissingTree(source, destination) {
+  if (!fs.existsSync(source)) return;
+  const stat = fs.statSync(source);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(destination, {recursive:true});
+    for (const entry of fs.readdirSync(source)) {
+      copyMissingTree(path.join(source, entry), path.join(destination, entry));
+    }
+    return;
+  }
+  if (!fs.existsSync(destination)) {
+    fs.mkdirSync(path.dirname(destination), {recursive:true});
+    fs.copyFileSync(source, destination);
+  }
+}
+if (STORAGE_ROOT !== ROOT) {
+  copyMissingTree(path.join(ROOT, 'uploads'), UPLOADS);
+  copyMissingTree(path.join(ROOT, 'data'), DATA_DIR);
+  copyMissingTree(path.join(ROOT, 'private-ebooks'), PRIVATE_EBOOKS);
+}
 fs.mkdirSync(UPLOADS, {recursive:true});
 fs.mkdirSync(DATA_DIR, {recursive:true});
 fs.mkdirSync(PRIVATE_EBOOKS, {recursive:true});

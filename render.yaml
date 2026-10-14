@@ -2,13 +2,19 @@ services:
   - type: web
     name: ss-study-centre
     runtime: node
-    plan: free
+    plan: starter
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
+    disk:
+      name: ss-study-centre-data
+      mountPath: /opt/render/project/src/storage
+      sizeGB: 5
     envVars:
       - key: NODE_ENV
         value: production
+      - key: STORAGE_ROOT
+        value: /opt/render/project/src/storage
       - key: ADMIN_PASSWORD
         sync: false
       - key: VAPID_SUBJECT
