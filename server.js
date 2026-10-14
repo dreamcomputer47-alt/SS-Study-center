@@ -171,7 +171,7 @@ async function serveR2Upload(req,res,name){
   const safe=path.basename(name);
   const local=path.join(UPLOADS,safe);
   if(r2Enabled){
-    if(R2_PUBLIC_URL) return res.redirect(302,R2_PUBLIC_URL+'/'+encodeURIComponent(safe));
+    if(R2_PUBLIC_URL) return res.redirect(302,R2_PUBLIC_URL+'/uploads/'+encodeURIComponent(safe));
     try {
       const range=req.headers.range;
       const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'uploads/'+safe,...(range?{Range:range}:{})}));
