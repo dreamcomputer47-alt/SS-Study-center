@@ -3,6 +3,8 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+let S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand;
+try { ({S3Client,PutObjectCommand,GetObjectCommand,DeleteObjectCommand,HeadObjectCommand}=require('@aws-sdk/client-s3')); } catch {}
 let webpush = null;
 try { webpush = require('web-push'); } catch {}
 
@@ -17,6 +19,27 @@ const DATA_DIR = path.join(ROOT, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'content.json');
 const PRIVATE_EBOOKS = path.join(ROOT, 'private-ebooks');
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
+
+// Optional Cloudflare R2 object storage. Leave the R2_* variables unset for local development.
+const R2_ACCOUNT_ID = String(process.env.R2_ACCOUNT_ID || '').trim();
+const R2_BUCKET = String(process.env.R2_BUCKET || '').trim();
+const R2_ACCESS_KEY_ID = String(process.env.R2_ACCESS_KEY_ID || '').trim();
+const R2_SECRET_ACCESS_KEY = String(process.env.R2_SECRET_ACCESS_KEY || '').trim();
+const R2_PUBLIC_URL = String(process.env.R2_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+const R2_DATA_KEY = String(process.env.R2_DATA_KEY || '_system/content.json').replace(/^\/+/, '');
+const r2Requested = !!(R2_ACCOUNT_ID || R2_BUCKET || R2_ACCESS_KEY_ID || R2_SECRET_ACCESS_KEY);
+if(r2Requested && !(R2_ACCOUNT_ID && R2_BUCKET && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY)) {
+  throw new Error('Cloudflare R2 configuration is incomplete. Set R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY together.');
+}
+if(r2Requested && !S3Client) {
+  throw new Error('Cloudflare R2 variables are set but @aws-sdk/client-s3 is not installed. Check npm install/build logs.');
+}
+const r2Enabled = r2Requested;
+const r2 = r2Enabled ? new S3Client({
+  region: 'auto',
+  endpoint: 'https://' + R2_ACCOUNT_ID + '.r2.cloudflarestorage.com',
+  credentials: {accessKeyId:R2_ACCESS_KEY_ID,secretAccessKey:R2_SECRET_ACCESS_KEY}
+}) : null;
 fs.mkdirSync(UPLOADS, {recursive:true});
 fs.mkdirSync(DATA_DIR, {recursive:true});
 fs.mkdirSync(PRIVATE_EBOOKS, {recursive:true});
@@ -55,8 +78,9 @@ function getVapidKeys(){
   try { if(fs.existsSync(VAPID_FILE)) return JSON.parse(fs.readFileSync(VAPID_FILE,'utf8')); } catch {}
   try { const keys=webpush.generateVAPIDKeys(); fs.writeFileSync(VAPID_FILE, JSON.stringify(keys,null,2)); return keys; } catch { return null; }
 }
-const vapidKeys = getVapidKeys();
-if(webpush && vapidKeys){ try { webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:ssstudycentre@example.com', vapidKeys.publicKey, vapidKeys.privateKey); } catch {} }
+let vapidKeys = getVapidKeys();
+function configureVapidKeys(keys){ if(webpush && keys){ try { webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:ssstudycentre@example.com', keys.publicKey, keys.privateKey); } catch {} } }
+configureVapidKeys(vapidKeys);
 function sendPush(payload){
   if(!webpush || !vapidKeys || !db.pushSubscriptions.length) return;
   const body=JSON.stringify(payload);
@@ -68,7 +92,126 @@ function addNotification({type='notice',title,message,url='#',push=true,courseId
   if(push) sendPush({title:item.title,body:item.message,url:item.url,tag:item.id});
   return item;
 }
-function saveData(){ fs.writeFileSync(DATA_FILE, JSON.stringify(db,null,2)); }
+let dataSaveQueue = Promise.resolve();
+function saveData(){
+  const snapshot = JSON.stringify(db,null,2);
+  fs.writeFileSync(DATA_FILE, snapshot);
+  if(r2Enabled){
+    dataSaveQueue = dataSaveQueue.then(()=>r2.send(new PutObjectCommand({
+      Bucket:R2_BUCKET, Key:R2_DATA_KEY, Body:snapshot, ContentType:'application/json; charset=utf-8'
+    }))).catch(err=>console.error('[R2] Could not persist content data:',err?.message||err));
+  }
+}
+function mimeForPath(filePath){
+  return ({'.mp4':'video/mp4','.webm':'video/webm','.ogg':'video/ogg','.mov':'video/quicktime','.m4v':'video/mp4','.pdf':'application/pdf','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.svg':'image/svg+xml'}[path.extname(filePath).toLowerCase()]||'application/octet-stream');
+}
+async function putFileInR2(filePath,key,mimeType){
+  if(!r2Enabled) return;
+  const stat=fs.statSync(filePath);
+  await r2.send(new PutObjectCommand({
+    Bucket:R2_BUCKET,Key:key,Body:fs.createReadStream(filePath),
+    ContentLength:stat.size,ContentType:mimeType||mimeForPath(filePath)
+  }));
+}
+async function deleteR2Object(key){
+  if(!r2Enabled || !key) return;
+  try { await r2.send(new DeleteObjectCommand({Bucket:R2_BUCKET,Key:key})); }
+  catch(err){ console.error('[R2] Could not delete object:',key,err?.message||err); }
+}
+async function restoreR2DataAndMigrateFiles(){
+  if(!r2Enabled) return;
+  try {
+    const remote=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:R2_DATA_KEY}));
+    const chunks=[];
+    for await (const chunk of remote.Body) chunks.push(Buffer.from(chunk));
+    const snapshot=Buffer.concat(chunks).toString('utf8');
+    JSON.parse(snapshot);
+    fs.writeFileSync(DATA_FILE,snapshot);
+    db=loadData();
+    console.log('[R2] Restored persistent content data.');
+  } catch(err) {
+    if(!['NoSuchKey','NotFound','NoSuchObject','404'].includes(err?.name) && err?.$metadata?.httpStatusCode!==404) throw err;
+    for(const [dir,prefix] of [[UPLOADS,'uploads/'],[PRIVATE_EBOOKS,'private-ebooks/']]){
+      if(!fs.existsSync(dir)) continue;
+      for(const name of fs.readdirSync(dir)){
+        const p=path.join(dir,name);
+        if(!fs.statSync(p).isFile()) continue;
+        const key=prefix+name;
+        try { await r2.send(new HeadObjectCommand({Bucket:R2_BUCKET,Key:key})); }
+        catch(headErr){
+          if(headErr?.$metadata?.httpStatusCode!==404 && !['NotFound','NoSuchKey'].includes(headErr?.name)) throw headErr;
+          await putFileInR2(p,key,mimeForPath(p));
+        }
+      }
+    }
+    const initial=fs.existsSync(DATA_FILE)?fs.readFileSync(DATA_FILE,'utf8'):JSON.stringify(db,null,2);
+    JSON.parse(initial);
+    fs.writeFileSync(DATA_FILE,initial);
+    await r2.send(new PutObjectCommand({Bucket:R2_BUCKET,Key:R2_DATA_KEY,Body:initial,ContentType:'application/json; charset=utf-8'}));
+    console.log('[R2] Seeded persistent content data from the current local copy.');
+  }
+  await syncVapidKeysR2();
+}
+async function syncVapidKeysR2(){
+  if(!r2Enabled || (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY)) return;
+  try {
+    const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'_system/vapid.json'}));
+    const chunks=[]; for await(const chunk of obj.Body) chunks.push(Buffer.from(chunk));
+    const keys=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if(keys.publicKey && keys.privateKey){
+      vapidKeys=keys;
+      fs.writeFileSync(VAPID_FILE,JSON.stringify(keys,null,2));
+      configureVapidKeys(vapidKeys);
+      console.log('[R2] Restored persistent push notification keys.');
+    }
+  } catch(err) {
+    if(err?.$metadata?.httpStatusCode!==404 && !['NoSuchKey','NotFound','NoSuchObject'].includes(err?.name)) throw err;
+    if(fs.existsSync(VAPID_FILE)){
+      const raw=fs.readFileSync(VAPID_FILE,'utf8');
+      JSON.parse(raw);
+      await r2.send(new PutObjectCommand({Bucket:R2_BUCKET,Key:'_system/vapid.json',Body:raw,ContentType:'application/json'}));
+      console.log('[R2] Seeded push notification keys.');
+    }
+  }
+}
+async function serveR2Upload(req,res,name){
+  const safe=path.basename(name);
+  const local=path.join(UPLOADS,safe);
+  if(r2Enabled){
+    if(R2_PUBLIC_URL) return res.redirect(302,R2_PUBLIC_URL+'/uploads/'+encodeURIComponent(safe));
+    try {
+      const range=req.headers.range;
+      const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'uploads/'+safe,...(range?{Range:range}:{})}));
+      if(obj.ContentType) res.setHeader('Content-Type',obj.ContentType);
+      res.setHeader('Accept-Ranges','bytes');
+      res.setHeader('Cache-Control','public, max-age=3600');
+      if(obj.ContentLength!==undefined) res.setHeader('Content-Length',obj.ContentLength);
+      if(obj.ContentRange) res.setHeader('Content-Range',obj.ContentRange);
+      res.status(obj.ContentRange?206:200);
+      return obj.Body.pipe(res);
+    } catch(err) {
+      if(err?.$metadata?.httpStatusCode!==404 && !['NoSuchKey','NotFound'].includes(err?.name)){
+        console.error('[R2] Media read failed:',err?.message||err);
+        if(!fs.existsSync(local)) return res.status(502).end('Storage temporarily unavailable');
+      }
+    }
+  }
+  if(!fs.existsSync(local)) return res.status(404).end();
+  const stat=fs.statSync(local);
+  res.setHeader('Content-Type',mimeForPath(local));
+  res.setHeader('Accept-Ranges','bytes');
+  if(req.headers.range){
+    const m=/bytes=(\d*)-(\d*)/.exec(req.headers.range);
+    if(!m) return res.status(416).setHeader('Content-Range','bytes */'+stat.size).end();
+    let start=m[1]?Number(m[1]):0,end=m[2]?Number(m[2]):stat.size-1;
+    if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=stat.size) return res.status(416).setHeader('Content-Range','bytes */'+stat.size).end();
+    end=Math.min(end,stat.size-1);
+    res.status(206).setHeader('Content-Range','bytes '+start+'-'+end+'/'+stat.size).setHeader('Content-Length',end-start+1);
+    return fs.createReadStream(local,{start,end}).pipe(res);
+  }
+  res.setHeader('Content-Length',stat.size);
+  return fs.createReadStream(local).pipe(res);
+}
 function id(){ return crypto.randomUUID(); }
 function safeName(original){ return Date.now()+'-'+crypto.randomBytes(5).toString('hex')+'-'+path.basename(original).replace(/[^a-zA-Z0-9._-]/g,'_'); }
 const studentSessions = new Map();
@@ -85,14 +228,41 @@ const sessions = new Set();
 function auth(req,res,next){ if(!sessions.has(cookieToken(req))) return res.status(401).json({error:'Unauthorized'}); next(); }
 
 const storage = multer.diskStorage({destination: UPLOADS, filename:(req,file,cb)=>cb(null,safeName(file.originalname))});
-const upload = multer({storage, limits:{fileSize: 2*1024*1024*1024}});
+const diskUpload = multer({storage, limits:{fileSize: 2*1024*1024*1024}});
+function r2AwareUpload(multerMiddleware){
+  return (req,res,next)=>multerMiddleware(req,res,async err=>{
+    if(err) return next(err);
+    if(!r2Enabled) return next();
+    const files=[...(req.file?[req.file]:[]),...(Array.isArray(req.files)?req.files:Object.values(req.files||{}).flat())];
+    try {
+      for(const file of files){
+        const isPrivateEbook=req.path==='/api/admin/ebook' && file.fieldname==='file';
+        const key=(isPrivateEbook?'private-ebooks/':'uploads/')+path.basename(file.filename);
+        await putFileInR2(file.path,key,file.mimetype);
+        file.r2Key=key;
+      }
+      next();
+    } catch(uploadErr) {
+      console.error('[R2] Upload failed:',uploadErr?.message||uploadErr);
+      res.status(502).json({error:'Cloud storage upload failed. The item was not published; please retry.'});
+    }
+  });
+}
+const upload = {
+  single:(field)=>r2AwareUpload(diskUpload.single(field)),
+  fields:(fields)=>r2AwareUpload(diskUpload.fields(fields)),
+  any:()=>r2AwareUpload(diskUpload.any()),
+  array:(field,maxCount)=>r2AwareUpload(diskUpload.array(field,maxCount))
+};
 
 app.use(express.json({limit:'2mb'}));
+app.get('/uploads/:file', (req,res)=>serveR2Upload(req,res,req.params.file));
 app.use('/uploads', express.static(UPLOADS, {maxAge:'7d'}));
 
 // Reliable video streaming with HTTP Range support.
 app.get('/media/:file', (req,res)=>{
   const name=path.basename(String(req.params.file||''));
+  if(r2Enabled) return res.redirect(302,'/uploads/'+encodeURIComponent(name));
   const file=path.join(UPLOADS,name);
   if(!fs.existsSync(file)) return res.status(404).end();
   const ext=path.extname(file).toLowerCase();
@@ -111,10 +281,22 @@ app.get('/media/:file', (req,res)=>{
 });
 app.use(express.static(PUBLIC, {maxAge:'1h'}));
 
-app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',time:new Date().toISOString()}));
-app.get('/api/public', (req,res)=>{
+app.get('/api/health', (req,res)=>res.json({ok:true,service:'SS Study Centre',storage:r2Enabled?'cloudflare-r2':'local',time:new Date().toISOString()}));
+app.get('/api/public', async (req,res)=>{
   const publicStudent=currentStudent(req);
-  let paymentQRDataUrl=''; try { const q=String(db.settings?.paymentQR||''); const qp=q.startsWith('/uploads/')?path.join(ROOT,q.replace(/^\//,'')):''; if(qp && fs.existsSync(qp)){ const ext=path.extname(qp).toLowerCase(); const mime=ext==='.png'?'image/png':ext==='.webp'?'image/webp':'image/jpeg'; paymentQRDataUrl='data:'+mime+';base64,'+fs.readFileSync(qp).toString('base64'); } } catch {}
+  let paymentQRDataUrl='';
+  try {
+    const q=String(db.settings?.paymentQR||'');
+    const name=q.startsWith('/uploads/')?path.basename(q):'';
+    if(name && r2Enabled){
+      const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'uploads/'+name}));
+      const chunks=[]; for await(const chunk of obj.Body) chunks.push(Buffer.from(chunk));
+      paymentQRDataUrl='data:'+(obj.ContentType||mimeForPath(name))+';base64,'+Buffer.concat(chunks).toString('base64');
+    } else if(name){
+      const qp=path.join(UPLOADS,name);
+      if(fs.existsSync(qp)) paymentQRDataUrl='data:'+mimeForPath(qp)+';base64,'+fs.readFileSync(qp).toString('base64');
+    }
+  } catch {}
   res.json({
     currentStudent: studentView(publicStudent),
     courseAccess: publicStudent ? Object.fromEntries((publicStudent.purchases||[]).map(id=>[id,true])) : {},
@@ -165,7 +347,29 @@ app.post('/api/student/save',studentAuth,(req,res)=>{ const cid=String(req.body?
 app.post('/api/student/profile',studentAuth,upload.single('photo'),(req,res)=>{ if(req.body.name!==undefined) req.student.name=String(req.body.name).trim().slice(0,100); if(req.body.dob!==undefined)req.student.dob=String(req.body.dob); if(req.body.gender!==undefined)req.student.gender=String(req.body.gender); if(req.file){if(!req.file.mimetype.startsWith('image/')){try{fs.unlinkSync(req.file.path)}catch{};return res.status(400).json({error:'Profile photo must be image'});} removeFile(req.student.photo); req.student.photo='/uploads/'+req.file.filename;} saveData(); res.json(studentView(req.student)); });
 app.post('/api/student/purchase-request',studentAuth,(req,res)=>{ const courseId=String(req.body?.courseId||''); const c=courseCatalog().find(x=>x.id===courseId); if(!c)return res.status(404).json({error:'Course not found'}); const price=Number(db.settings?.coursePricing?.[courseId])||0; if(price<=0){req.student.purchases=req.student.purchases||[];if(!req.student.purchases.includes(courseId))req.student.purchases.push(courseId);saveData();return res.json({ok:true,free:true});} db.purchaseRequests=db.purchaseRequests||[]; const pending=db.purchaseRequests.find(x=>x.studentId===req.student.id&&x.courseId===courseId&&x.status==='pending'); if(pending)return res.status(409).json({error:'Purchase request already submitted'}); const item={id:id(),studentId:req.student.id,studentName:req.student.name,phone:req.student.phone,courseId,transactionId:String(req.body?.utr||'').trim(),utr:String(req.body?.utr||'').trim(),status:'pending',createdAt:new Date().toISOString()}; db.purchaseRequests.push(item);saveData();res.json(item); });
 app.post('/api/student/ebook-purchase-request',studentAuth,(req,res)=>{const ebookId=String(req.body?.ebookId||'');const e=(db.ebooks||[]).find(x=>x.id===ebookId);if(!e)return res.status(404).json({error:'E-book not found'});if((req.student.ebookPurchases||[]).includes(ebookId))return res.status(409).json({error:'E-book already purchased'});db.ebookPurchaseRequests=db.ebookPurchaseRequests||[];const pending=db.ebookPurchaseRequests.find(x=>x.studentId===req.student.id&&x.ebookId===ebookId&&x.status==='pending');if(pending)return res.status(409).json({error:'Purchase request already submitted'});const utr=String(req.body?.utr||'').trim();const item={id:id(),studentId:req.student.id,studentName:req.student.name,phone:req.student.phone,ebookId,ebookTitle:e.title,price:e.price,transactionId:utr,utr,status:'pending',createdAt:new Date().toISOString()};db.ebookPurchaseRequests.push(item);saveData();res.json(item);});
-app.get('/api/student/ebooks/:id/file',studentAuth,(req,res)=>{const e=(db.ebooks||[]).find(x=>x.id===req.params.id);if(!e)return res.status(404).json({error:'E-book not found'});if(!(req.student.ebookPurchases||[]).includes(e.id))return res.status(403).json({error:'E-book purchase/approval required'});const p=path.join(PRIVATE_EBOOKS,path.basename(String(e.file||'')));if(!p.startsWith(PRIVATE_EBOOKS+path.sep)||!fs.existsSync(p))return res.status(404).json({error:'E-book file unavailable'});res.setHeader('Content-Disposition','inline; filename="'+path.basename(p).replace(/"/g,'')+'"');res.sendFile(p);});
+app.get('/api/student/ebooks/:id/file',studentAuth,async(req,res)=>{
+  const e=(db.ebooks||[]).find(x=>x.id===req.params.id);
+  if(!e)return res.status(404).json({error:'E-book not found'});
+  if(!(req.student.ebookPurchases||[]).includes(e.id))return res.status(403).json({error:'E-book purchase/approval required'});
+  const name=path.basename(String(e.file||''));
+  const p=path.join(PRIVATE_EBOOKS,name);
+  res.setHeader('Content-Disposition','inline; filename="'+name.replace(/"/g,'')+'"');
+  if(r2Enabled){
+    try {
+      const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'private-ebooks/'+name}));
+      if(obj.ContentType)res.setHeader('Content-Type',obj.ContentType);
+      if(obj.ContentLength!==undefined)res.setHeader('Content-Length',obj.ContentLength);
+      return obj.Body.pipe(res);
+    } catch(err) {
+      if(err?.$metadata?.httpStatusCode!==404 && !['NoSuchKey','NotFound'].includes(err?.name)){
+        console.error('[R2] Private e-book read failed:',err?.message||err);
+        if(!fs.existsSync(p))return res.status(502).end('Storage temporarily unavailable');
+      }
+    }
+  }
+  if(!p.startsWith(PRIVATE_EBOOKS+path.sep)||!fs.existsSync(p))return res.status(404).json({error:'E-book file unavailable'});
+  return res.sendFile(p);
+});
 app.get('/api/student/mock-tests/:id',(req,res)=>{const x=(db.mockTests||[]).find(x=>x.id===req.params.id);if(!x)return res.status(404).json({error:'Mock test not found'});res.json(x);});
 app.post('/api/student/mock-tests/:id/submit',studentAuth,(req,res)=>{
   const x=(db.mockTests||[]).find(x=>x.id===req.params.id);
@@ -281,8 +485,8 @@ app.delete('/api/admin/course/:id',auth,(req,res)=>{
   saveData(); res.json({ok:true});
 });
 
-app.post('/api/admin/ebook',auth,upload.fields([{name:'file',maxCount:1},{name:'cover',maxCount:1}]),(req,res)=>{const file=req.files?.file?.[0],cover=req.files?.cover?.[0];if(!file||file.mimetype!=='application/pdf'){if(file)try{fs.unlinkSync(file.path)}catch{};if(cover)try{fs.unlinkSync(cover.path)}catch{};return res.status(400).json({error:'Paid E-book PDF required'});}const privateName=safeName(file.originalname);const privatePath=path.join(PRIVATE_EBOOKS,privateName);try{fs.renameSync(file.path,privatePath)}catch{try{fs.copyFileSync(file.path,privatePath);fs.unlinkSync(file.path)}catch{return res.status(500).json({error:'Could not store private e-book file'});}}const item={id:id(),title:String(req.body?.title||file.originalname).trim().slice(0,180),description:String(req.body?.description||'').trim().slice(0,1200),price:Math.max(1,Number(req.body?.price)||0),file:privateName,cover:cover?'/uploads/'+cover.filename:null,size:file.size,createdAt:new Date().toISOString()};db.ebooks=db.ebooks||[];db.ebooks.push(item);saveData();addNotification({title:'📘 নতুন Paid E-book publish হয়েছে',message:item.title+' — E-book Store-এ নতুন বই এসেছে।',url:'#ebooks'});res.json({...item,file:undefined});});
-app.delete('/api/admin/ebooks/:id',auth,(req,res)=>{const i=(db.ebooks||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [e]=db.ebooks.splice(i,1);try{const p=path.join(PRIVATE_EBOOKS,path.basename(String(e.file||'')));if(p.startsWith(PRIVATE_EBOOKS+path.sep)&&fs.existsSync(p))fs.unlinkSync(p)}catch{}removeFile(e.cover);db.ebookPurchaseRequests=(db.ebookPurchaseRequests||[]).filter(r=>r.ebookId!==e.id);saveData();res.json({ok:true});});
+app.post('/api/admin/ebook',auth,upload.fields([{name:'file',maxCount:1},{name:'cover',maxCount:1}]),(req,res)=>{const file=req.files?.file?.[0],cover=req.files?.cover?.[0];if(!file||file.mimetype!=='application/pdf'){if(file)try{fs.unlinkSync(file.path)}catch{};if(cover)try{fs.unlinkSync(cover.path)}catch{};return res.status(400).json({error:'Paid E-book PDF required'});}const privateName=file.filename;const privatePath=path.join(PRIVATE_EBOOKS,privateName);try{fs.renameSync(file.path,privatePath)}catch{try{fs.copyFileSync(file.path,privatePath);fs.unlinkSync(file.path)}catch{return res.status(500).json({error:'Could not store private e-book file'});}}const item={id:id(),title:String(req.body?.title||file.originalname).trim().slice(0,180),description:String(req.body?.description||'').trim().slice(0,1200),price:Math.max(1,Number(req.body?.price)||0),file:privateName,cover:cover?'/uploads/'+cover.filename:null,size:file.size,createdAt:new Date().toISOString()};db.ebooks=db.ebooks||[];db.ebooks.push(item);saveData();addNotification({title:'📘 নতুন Paid E-book publish হয়েছে',message:item.title+' — E-book Store-এ নতুন বই এসেছে।',url:'#ebooks'});res.json({...item,file:undefined});});
+app.delete('/api/admin/ebooks/:id',auth,(req,res)=>{const i=(db.ebooks||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);const [e]=db.ebooks.splice(i,1);const name=path.basename(String(e.file||''));deleteR2Object('private-ebooks/'+name);try{const p=path.join(PRIVATE_EBOOKS,name);if(p.startsWith(PRIVATE_EBOOKS+path.sep)&&fs.existsSync(p))fs.unlinkSync(p)}catch{}removeFile(e.cover);db.ebookPurchaseRequests=(db.ebookPurchaseRequests||[]).filter(r=>r.ebookId!==e.id);saveData();res.json({ok:true});});
 app.post('/api/admin/ebook-purchase-requests/:id/approve',auth,(req,res)=>{const r=(db.ebookPurchaseRequests||[]).find(x=>x.id===req.params.id);if(!r)return res.status(404).json({error:'E-book purchase request not found'});const s=(db.students||[]).find(x=>x.id===r.studentId);if(!s)return res.status(404).json({error:'Student not found'});s.ebookPurchases=s.ebookPurchases||[];if(!s.ebookPurchases.includes(r.ebookId))s.ebookPurchases.push(r.ebookId);r.status='approved';r.approvedAt=new Date().toISOString();saveData();res.json({ok:true,student:studentView(s),request:r});});
 app.delete('/api/admin/ebook-purchase-requests/:id',auth,(req,res)=>{const i=(db.ebookPurchaseRequests||[]).findIndex(x=>x.id===req.params.id);if(i<0)return res.sendStatus(404);db.ebookPurchaseRequests.splice(i,1);saveData();res.json({ok:true});});
 app.get('/api/admin/ebooks',auth,(req,res)=>res.json({ebooks:db.ebooks||[],ebookPurchaseRequests:db.ebookPurchaseRequests||[]}));
@@ -388,7 +592,16 @@ app.post('/api/admin/pdf',auth,upload.single('pdf'),(req,res)=>{
   const item={id:id(), type:'pdf', title:String(req.body.title||req.file.originalname), url:'/uploads/'+req.file.filename, size:req.file.size, mime:req.file.mimetype, createdAt:new Date().toISOString()}; db.assets.push(item); saveData(); addNotification({title:'📚 নতুন study material যোগ হয়েছে',message:item.title,url:'#library'}); res.json(item);
 });
 
-function removeFile(url){ if(!url) return; const p=path.join(ROOT,url.replace(/^\//,'')); if(p.startsWith(UPLOADS+path.sep) && fs.existsSync(p)) fs.unlinkSync(p); }
+function removeFile(url){
+  if(!url) return;
+  const value=String(url);
+  if(value.startsWith('/uploads/')){
+    const name=path.basename(value);
+    deleteR2Object('uploads/'+name);
+    const p=path.join(UPLOADS,name);
+    if(p.startsWith(UPLOADS+path.sep) && fs.existsSync(p)) { try{fs.unlinkSync(p)}catch{} }
+  }
+}
 app.delete('/api/admin/videos/:id',auth,(req,res)=>{ const i=db.videos.findIndex(x=>x.id===req.params.id); if(i<0)return res.sendStatus(404); const [v]=db.videos.splice(i,1); removeFile(v.url); saveData(); res.json({ok:true}); });
 app.delete('/api/admin/affairs/:id',auth,(req,res)=>{ const i=db.affairs.findIndex(x=>x.id===req.params.id); if(i<0)return res.sendStatus(404); const [a]=db.affairs.splice(i,1); removeFile(a.image); removeFile(a.pdf); saveData(); res.json({ok:true}); });
 app.delete('/api/admin/assets/:id',auth,(req,res)=>{ const i=db.assets.findIndex(x=>x.id===req.params.id); if(i<0)return res.sendStatus(404); const [a]=db.assets.splice(i,1); removeFile(a.url); saveData(); res.json({ok:true}); });
@@ -398,4 +611,11 @@ function extractYoutubeId(input){ input=String(input||'').trim(); if(/^[A-Za-z0-
 app.get('/sw.js', (req,res)=>res.sendFile(path.join(PUBLIC,'sw.js'), {headers:{'Content-Type':'application/javascript','Cache-Control':'no-cache'}}));
 app.get('/admin', (req,res)=>res.sendFile(path.join(PUBLIC,'admin.html')));
 app.get(/.*/, (req,res)=>res.sendFile(path.join(PUBLIC,'index.html')));
-app.listen(PORT,()=>console.log(`SS Study Centre running on http://localhost:${PORT}`));
+async function startServer(){
+  await restoreR2DataAndMigrateFiles();
+  app.listen(PORT,()=>console.log('SS Study Centre running on port '+PORT+'; storage='+(r2Enabled?'cloudflare-r2':'local')));
+}
+startServer().catch(err=>{
+  console.error('[startup] Storage initialization failed; server was not started to avoid serving stale or unsafe data:',err?.message||err);
+  process.exitCode=1;
+});
