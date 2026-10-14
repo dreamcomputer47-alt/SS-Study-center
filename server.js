@@ -27,7 +27,14 @@ const R2_ACCESS_KEY_ID = String(process.env.R2_ACCESS_KEY_ID || '').trim();
 const R2_SECRET_ACCESS_KEY = String(process.env.R2_SECRET_ACCESS_KEY || '').trim();
 const R2_PUBLIC_URL = String(process.env.R2_PUBLIC_URL || '').trim().replace(/\/+$/, '');
 const R2_DATA_KEY = String(process.env.R2_DATA_KEY || '_system/content.json').replace(/^\/+/, '');
-const r2Enabled = !!(S3Client && R2_ACCOUNT_ID && R2_BUCKET && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY);
+const r2Requested = !!(R2_ACCOUNT_ID || R2_BUCKET || R2_ACCESS_KEY_ID || R2_SECRET_ACCESS_KEY);
+if(r2Requested && !(R2_ACCOUNT_ID && R2_BUCKET && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY)) {
+  throw new Error('Cloudflare R2 configuration is incomplete. Set R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY together.');
+}
+if(r2Requested && !S3Client) {
+  throw new Error('Cloudflare R2 variables are set but @aws-sdk/client-s3 is not installed. Check npm install/build logs.');
+}
+const r2Enabled = r2Requested;
 const r2 = r2Enabled ? new S3Client({
   region: 'auto',
   endpoint: 'https://' + R2_ACCOUNT_ID + '.r2.cloudflarestorage.com',
