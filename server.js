@@ -71,8 +71,9 @@ function getVapidKeys(){
   try { if(fs.existsSync(VAPID_FILE)) return JSON.parse(fs.readFileSync(VAPID_FILE,'utf8')); } catch {}
   try { const keys=webpush.generateVAPIDKeys(); fs.writeFileSync(VAPID_FILE, JSON.stringify(keys,null,2)); return keys; } catch { return null; }
 }
-const vapidKeys = getVapidKeys();
-if(webpush && vapidKeys){ try { webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:ssstudycentre@example.com', vapidKeys.publicKey, vapidKeys.privateKey); } catch {} }
+let vapidKeys = getVapidKeys();
+function configureVapidKeys(keys){ if(webpush && keys){ try { webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:ssstudycentre@example.com', keys.publicKey, keys.privateKey); } catch {} } }
+configureVapidKeys(vapidKeys);
 function sendPush(payload){
   if(!webpush || !vapidKeys || !db.pushSubscriptions.length) return;
   const body=JSON.stringify(payload);
@@ -141,6 +142,29 @@ async function restoreR2DataAndMigrateFiles(){
     fs.writeFileSync(DATA_FILE,initial);
     await r2.send(new PutObjectCommand({Bucket:R2_BUCKET,Key:R2_DATA_KEY,Body:initial,ContentType:'application/json; charset=utf-8'}));
     console.log('[R2] Seeded persistent content data from the current local copy.');
+  }
+  await syncVapidKeysR2();
+}
+async function syncVapidKeysR2(){
+  if(!r2Enabled || (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY)) return;
+  try {
+    const obj=await r2.send(new GetObjectCommand({Bucket:R2_BUCKET,Key:'_system/vapid.json'}));
+    const chunks=[]; for await(const chunk of obj.Body) chunks.push(Buffer.from(chunk));
+    const keys=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if(keys.publicKey && keys.privateKey){
+      vapidKeys=keys;
+      fs.writeFileSync(VAPID_FILE,JSON.stringify(keys,null,2));
+      configureVapidKeys(vapidKeys);
+      console.log('[R2] Restored persistent push notification keys.');
+    }
+  } catch(err) {
+    if(err?.$metadata?.httpStatusCode!==404 && !['NoSuchKey','NotFound','NoSuchObject'].includes(err?.name)) throw err;
+    if(fs.existsSync(VAPID_FILE)){
+      const raw=fs.readFileSync(VAPID_FILE,'utf8');
+      JSON.parse(raw);
+      await r2.send(new PutObjectCommand({Bucket:R2_BUCKET,Key:'_system/vapid.json',Body:raw,ContentType:'application/json'}));
+      console.log('[R2] Seeded push notification keys.');
+    }
   }
 }
 async function serveR2Upload(req,res,name){
