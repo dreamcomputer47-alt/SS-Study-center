@@ -1,0 +1,23 @@
+name: Validate website code
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [cloudflare-r2-storage-integration]
+
+jobs:
+  syntax-and-install:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies and reconcile lockfile
+        run: npm install
+      - name: Check server JavaScript syntax
+        run: node --check server.js
